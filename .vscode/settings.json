@@ -1,0 +1,47 @@
+{
+	// Настройки редактора
+	"editor.tabSize": 4, // Размер табуляции
+	"editor.insertSpaces": true, // Использовать табы вместо пробелов
+	"editor.detectIndentation": false, // Отключить автоматическое определение отступов
+	"editor.wordWrap": "on", // Перенос строк
+	"editor.renderWhitespace": "all", // Показывать пробелы и табы
+	"editor.minimap.enabled": false, // Отключить мини-карту
+	"files.autoSave": "onFocusChange", // Автосохранение при потере фокуса
+	"files.exclude": { // Исключить файлы из дерева проекта
+		"**/.git": true,
+		"**/.DS_Store": true,
+		"**/bin": true,
+		"**/obj": true
+	},
+	"workbench.colorTheme": "Default Dark+", // Цветовая тема
+	"workbench.iconTheme": "vs-seti", // Тема иконок
+	"go.formatTool": "gofmt", // Инструмент форматирования для Go
+	"go.lintOnSave": "package", // Линтинг при сохранении
+	"go.vetOnSave": "package", // Проверка при сохранении
+	"go.buildFlags": [], // Флаги сборки
+	"go.testFlags": [], // Флаги тестирования
+	"go.coverOnSave": false, // Покрытие кода при сохранении
+	"explorer.confirmDelete": false, // Отключить подтверждение удаления
+	"terminal.integrated.fontSize": 14, // Размер шрифта в терминале
+
+	"go.goroot": "C:\\Go",
+	"go.gopath": "C:\\Users\\MrTeeett\\go",
+	"cSpell.words": [
+		"alpn",
+		"edns",
+		"fyne",
+		"gioui",
+		"gofont",
+		"Hiddify",
+		"miekg",
+		"outbounds",
+		"rprx",
+		"sagernet",
+		"Serv",
+		"utls",
+		"vless",
+		"xtls",
+		"сериализации",
+		"Сериализуем"
+	]
+}

@@ -1,0 +1,5 @@
+.venv
+build
+builds
+profiles
+go.sum
