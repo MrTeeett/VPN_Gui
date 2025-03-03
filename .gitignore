@@ -3,3 +3,4 @@ build
 builds
 profiles
 go.sum
+go.mod

@@ -24,8 +24,6 @@
 	"explorer.confirmDelete": false, // Отключить подтверждение удаления
 	"terminal.integrated.fontSize": 14, // Размер шрифта в терминале
 
-	"go.goroot": "C:\\Go",
-	"go.gopath": "C:\\Users\\MrTeeett\\go",
 	"cSpell.words": [
 		"alpn",
 		"edns",
