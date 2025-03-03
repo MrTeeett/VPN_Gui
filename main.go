@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -36,6 +37,7 @@ var (
 	defaultConfig string      // последний запущенный файл для запуска по умолчанию
 	cmdMutex      sync.Mutex  // защита currentCmd/currentConfig
 	mainWindow    fyne.Window // главное окно для доступа из трей-меню
+	currentMode   string      // "vpn" или "proxy"
 )
 
 func main() {
@@ -45,10 +47,14 @@ func main() {
 	a := app.New()
 	mainWindow = a.NewWindow("VPN UI")
 
-	// Читаем сохранённый профиль по умолчанию.
+	// Читаем сохранённый профиль и режим по умолчанию.
 	defaultConfig = loadDefaultProfile()
+	currentMode = loadDefaultMode() // ("vpn" или "proxy")
 
-	// Боковая панель – добавляем кнопки для Profiles, Settings и Скриптов.
+	// Применяем выбранный режим к текущему конфигу.
+	applyModeToConfig(currentMode)
+
+	// Боковая панель – кнопки для Profiles, Settings, Скриптов.
 	sidePanel := container.NewVBox(
 		widget.NewButtonWithIcon("Profiles", theme.DocumentCreateIcon(), func() {
 			mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
@@ -57,7 +63,7 @@ func main() {
 		widget.NewButtonWithIcon("Settings", theme.SettingsIcon(), func() {
 			// Обработка настроек
 		}),
-		widget.NewButtonWithIcon("Скрипты", theme.MediaPlayIcon(), func() {
+		widget.NewButtonWithIcon("Scripts", theme.MediaPlayIcon(), func() {
 			mainContent.Objects = []fyne.CanvasObject{createScriptsTab(a)}
 			mainContent.Refresh()
 		}),
@@ -68,24 +74,44 @@ func main() {
 	// Главный контейнер – изначально отображаем список профилей.
 	mainContent = container.NewVBox(createProfilesList())
 
-	// Верхняя панель (гамбургер + заголовок)
+	// Верхняя панель.
 	hamburger := widget.NewButtonWithIcon("", theme.MenuIcon(), nil)
 	topBar := container.NewBorder(nil, nil, hamburger, nil, widget.NewLabel("Profiles"))
 
-	// Кнопка "+" для создания нового конфига
+	// Создаём раскрывающийся список для выбора режима.
+	var modeSelect *widget.Select
+	modeSelect = widget.NewSelect([]string{"Proxy", "VPN"}, func(choice string) {
+		newMode := strings.ToLower(choice)
+		if newMode != currentMode {
+			if newMode == "vpn" && !isAdmin() {
+				dialog.ShowConfirm("Предупреждение", "VPN-режим требует запуска от администратора...", func(confirmed bool) {
+					if confirmed {
+						applyMode(newMode)
+						modeSelect.SetSelected(strings.Title(newMode)) // Теперь modeSelect доступен
+					} else {
+						modeSelect.SetSelected(strings.Title(currentMode))
+					}
+				}, mainWindow)
+			} else {
+				applyMode(newMode)
+			}
+		}
+	})
+	modeSelect.Selected = strings.Title(currentMode)
+
+	// Кнопка "+" для создания нового конфига.
 	plusBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
 		showCreateConfigDialog(a)
 	})
-	bottomBar := container.NewBorder(nil, nil, nil,
-		container.NewHBox(layout.NewSpacer(), plusBtn),
-		nil,
-	)
 
-	// Итоговый контейнер
+	// Нижняя панель: располагаем dropdown выбора режима слева от кнопки "+".
+	bottomBar := container.NewBorder(nil, nil, nil, container.NewHBox(layout.NewSpacer(), modeSelect, plusBtn), nil)
+
+	// Итоговый контейнер.
 	content := container.NewBorder(topBar, bottomBar, sidePanel, nil, mainContent)
 	mainWindow.SetContent(content)
 
-	// Логика открытия/скрытия боковой панели
+	// Логика скрытия боковой панели.
 	var panelOpen = true
 	hamburger.OnTapped = func() {
 		panelOpen = !panelOpen
@@ -106,7 +132,7 @@ func main() {
 	mainWindow.ShowAndRun()
 }
 
-// loadDefaultProfile читает сохранённый профиль из файла.
+// loadDefaultProfile читает путь к профилю из файла default_profile.txt.
 func loadDefaultProfile() string {
 	data, err := os.ReadFile("default_profile.txt")
 	if err != nil {
@@ -115,13 +141,261 @@ func loadDefaultProfile() string {
 	return strings.TrimSpace(string(data))
 }
 
-// saveDefaultProfile сохраняет профиль в файл.
+// saveDefaultProfile сохраняет путь к профилю в файл default_profile.txt.
 func saveDefaultProfile(profile string) {
 	err := os.WriteFile("default_profile.txt", []byte(profile), 0644)
 	if err != nil {
 		fmt.Println("Error saving default profile:", err)
 	}
 }
+
+// loadDefaultMode читает режим ("vpn" или "proxy") из файла default_mode.txt.
+func loadDefaultMode() string {
+	data, err := os.ReadFile("default_mode.txt")
+	if err != nil {
+		return "proxy" // режим по умолчанию – proxy
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// saveDefaultMode сохраняет выбранный режим в файл default_mode.txt.
+func saveDefaultMode(mode string) {
+	err := os.WriteFile("default_mode.txt", []byte(mode), 0644)
+	if err != nil {
+		fmt.Println("Error saving default mode:", err)
+	}
+}
+
+// applyModeToConfig обновляет конфигурацию в файле defaultConfig в зависимости от режима.
+func applyModeToConfig(mode string) {
+	// Загружаем существующий конфиг (если он есть).
+	var cfg settings.Config
+	data, err := os.ReadFile(defaultConfig)
+	if err != nil {
+		// Если файла нет, создаём базовую конфигурацию.
+		cfg = settings.Config{
+			Log: settings.Log{Level: "info"},
+			Inbounds: []settings.Inbounds{{
+				Type:                       "mixed",
+				Tag:                        "mixed-in",
+				Listen:                     "127.0.0.1",
+				Listen_port:                2080,
+				Sniff:                      true,
+				Sniff_override_destination: true,
+			}},
+			Outbounds: []settings.Outbound{{
+				Type:        "vless",
+				Tag:         "vless-out",
+				Server:      "193.32.178.80",
+				Server_port: 443,
+				Uuid:        "887e27c6-cb6f-4200-95a5-ee1bbf383d0f",
+				Flow:        "xtls-rprx-vision",
+				Network:     "tcp",
+				Tls: &settings.TLS{
+					Enabled:     true,
+					Server_name: "www.nvidia.com",
+					Alpn:        []string{"h2"},
+					Utils: &settings.Utils{
+						Enabled:     true,
+						Fingerprint: "chrome",
+					},
+					Reality: &settings.Reality{
+						Enabled:    true,
+						Public_key: "Bvu2NigYahtp1YHyVJvE3yknCqLmNUJi0RAwdQPWKF4",
+						Short_id:   "4054b202f9223bdb",
+					},
+				},
+			}, {
+				Type: "direct",
+				Tag:  "direct-out",
+			}},
+		}
+	} else {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			fmt.Println("Error parsing config:", err)
+			return
+		}
+	}
+
+	if mode == "vpn" {
+		// Переключаем inbound в режим VPN: тип "tun" с VPN‑параметрами.
+		if len(cfg.Inbounds) > 0 {
+			cfg.Inbounds[0].Type = "tun"
+			cfg.Inbounds[0].Tag = "tun-in"
+			// Удаляем поля Listen и Listen_port для VPN‑режима.
+			cfg.Inbounds[0].Listen = ""
+			cfg.Inbounds[0].Listen_port = 0
+
+			// Устанавливаем дополнительные VPN‑параметры:
+			cfg.Inbounds[0].Interface_name = "proxycoretun"
+			cfg.Inbounds[0].Address = []string{"10.10.0.1/30"}
+			cfg.Inbounds[0].Mtu = 1500
+			cfg.Inbounds[0].Auto_route = true
+			cfg.Inbounds[0].Strict_route = true
+			cfg.Inbounds[0].Stack = "system"
+		} else {
+			cfg.Inbounds = []settings.Inbounds{{
+				Type:                       "tun",
+				Tag:                        "tun-in",
+				Sniff:                      true,
+				Sniff_override_destination: false,
+				Interface_name:             "proxycoretun",
+				Address:                    []string{"10.10.0.1/30"},
+				Mtu:                        1500,
+				Auto_route:                 true,
+				Strict_route:               true,
+				Stack:                      "system",
+			}}
+		}
+		// Добавляем секцию DNS для VPN‑режима.
+		cfg.DNS = &settings.DNS{
+			Servers: []settings.DNSServer{
+				{Tag: "proxy_dns", Address: "https://1.1.1.1/dns-query", Strategy: "ipv4_only", Detour: "vless-out"},
+				{Tag: "fallback_dns", Address: "8.8.8.8", Strategy: "ipv4_only", Detour: "direct-out"},
+			},
+			Final: "proxy_dns",
+		}
+		// Добавляем секцию Route для VPN‑режима.
+		cfg.Route = &settings.Route{
+			Auto_detect_interface: true,
+			Rules: []settings.RouteRule{
+				{Protocol: "udp", Outbound: "direct-out"},
+				{Protocol: "dns", Outbound: "dns-out"},
+				{Ip_is_private: true, Outbound: "direct-out"},
+			},
+		}
+		// Добавляем Outbounds типа "dns" и "block", если их нет.
+		hasDNS, hasBlock := false, false
+		for _, o := range cfg.Outbounds {
+			if o.Type == "dns" {
+				hasDNS = true
+			}
+			if o.Type == "block" {
+				hasBlock = true
+			}
+		}
+		if !hasDNS {
+			cfg.Outbounds = append(cfg.Outbounds, settings.Outbound{Type: "dns", Tag: "dns-out"})
+		}
+		if !hasBlock {
+			cfg.Outbounds = append(cfg.Outbounds, settings.Outbound{Type: "block", Tag: "block"})
+		}
+	} else { // режим "proxy"
+		if len(cfg.Inbounds) > 0 {
+			cfg.Inbounds[0].Type = "mixed"
+			cfg.Inbounds[0].Tag = "mixed-in"
+			// В режиме Proxy используем системный inbound с Listen и Listen_port.
+			cfg.Inbounds[0].Listen = "127.0.0.1"
+			cfg.Inbounds[0].Listen_port = 2080
+
+			// Очищаем VPN‑поля:
+			cfg.Inbounds[0].Interface_name = ""
+			cfg.Inbounds[0].Address = nil
+			cfg.Inbounds[0].Mtu = 0
+			cfg.Inbounds[0].Auto_route = false
+			cfg.Inbounds[0].Strict_route = false
+			cfg.Inbounds[0].Stack = ""
+		} else {
+			cfg.Inbounds = []settings.Inbounds{{
+				Type:                       "mixed",
+				Tag:                        "mixed-in",
+				Listen:                     "127.0.0.1",
+				Listen_port:                2080,
+				Sniff:                      true,
+				Sniff_override_destination: true,
+			}}
+		}
+		// Удаляем VPN‑специфичные секции.
+		cfg.DNS = nil
+		cfg.Route = nil
+		// Фильтруем Outbounds: оставляем только те, что не относятся к "dns" и "block".
+		var newOutbounds []settings.Outbound
+		for _, o := range cfg.Outbounds {
+			if o.Type != "dns" && o.Type != "block" {
+				newOutbounds = append(newOutbounds, o)
+			}
+		}
+		cfg.Outbounds = newOutbounds
+	}
+
+	// Сохраняем обновлённый конфиг.
+	newData, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		fmt.Println("Error marshaling updated config:", err)
+		return
+	}
+	if err := os.WriteFile(defaultConfig, newData, 0644); err != nil {
+		fmt.Println("Error writing updated config:", err)
+		return
+	}
+	fmt.Println("Config updated to mode:", mode)
+}
+
+// showModeSelectionDialog позволяет выбрать режим работы.
+func showModeSelectionDialog(a fyne.App) {
+	// Этот метод теперь не используется, так как выбор режима происходит через выпадающий список.
+	// Он оставлен для совместимости, если понадобится вызвать его отдельно.
+	win := a.NewWindow("Выбор режима")
+	options := []string{"Proxy", "VPN"}
+	selected := strings.Title(currentMode)
+	radio := widget.NewRadioGroup(options, func(choice string) {
+		selected = choice
+	})
+	radio.Horizontal = true
+	radio.Selected = selected
+
+	okBtn := widget.NewButton("OK", func() {
+		mode := strings.ToLower(selected)
+		if mode == "vpn" && !isAdmin() {
+			dialog.ShowConfirm("Предупреждение", "VPN-режим требует запуска от администратора. Запустите программу с правами администратора для корректной работы VPN.", func(confirmed bool) {
+				if confirmed {
+					applyMode(mode)
+					win.Close()
+				}
+			}, win)
+		} else {
+			applyMode(mode)
+			win.Close()
+		}
+	})
+	cancelBtn := widget.NewButton("Cancel", func() {
+		win.Close()
+	})
+	content := container.NewVBox(
+		widget.NewLabel("Выберите режим работы:"),
+		radio,
+		container.NewHBox(layout.NewSpacer(), okBtn, cancelBtn),
+	)
+	win.SetContent(content)
+	win.Resize(fyne.NewSize(400, 150))
+	win.Show()
+}
+
+// applyMode сохраняет выбранный режим и обновляет конфигурацию.
+func applyMode(mode string) {
+	currentMode = mode
+	saveDefaultMode(mode)
+	applyModeToConfig(mode)
+	mainWindow.SetTitle(fmt.Sprintf("VPN UI - %s", strings.Title(mode)))
+	fmt.Println("Режим изменён на:", mode)
+
+	// Если конфигурация запущена, автоматически перезапускаем её
+	if currentCmd != nil && defaultConfig != "" {
+		stopConfig()
+		runConfig(defaultConfig)
+	}
+}
+
+// isAdmin проверяет, запущена ли программа от администратора (только для Windows).
+func isAdmin() bool {
+	cmd := exec.Command("net", "session")
+	err := cmd.Run()
+	return err == nil
+}
+
+//
+// Остальные функции остаются без изменений
+//
 
 // onReady вызывается при инициализации трей-иконки.
 func onReady() {
@@ -207,7 +481,6 @@ func createProfilesList() fyne.CanvasObject {
 				cmdMutex.Unlock()
 
 				if processRunning {
-					// Если процесс уже запущен, останавливаем его.
 					stopConfig()
 					if currentProcess != path {
 						runConfig(path)
@@ -220,7 +493,6 @@ func createProfilesList() fyne.CanvasObject {
 			}
 		}(fullPath)
 
-		// Обновляем текст кнопки в зависимости от запущенного конфига.
 		cmdMutex.Lock()
 		if currentCmd != nil && currentConfig == fullPath {
 			runStopBtn.SetText("Stop")
@@ -263,7 +535,6 @@ func createScriptsTab(a fyne.App) fyne.CanvasObject {
 	btn := widget.NewButton("Server Setup", func() {
 		showServerSetupDialog(a)
 	})
-	// Можно добавить дополнительные элементы, если потребуется.
 	return container.NewVBox(
 		widget.NewLabel("Скрипты"),
 		btn,
@@ -275,7 +546,6 @@ func createScriptsTab(a fyne.App) fyne.CanvasObject {
 func showServerSetupDialog(a fyne.App) {
 	win := a.NewWindow("Server Setup")
 
-	// Поля ввода для параметров подключения и настроек.
 	fileNameEntry := widget.NewEntry()
 	fileNameEntry.SetPlaceHolder("Name")
 
@@ -304,7 +574,6 @@ func showServerSetupDialog(a fyne.App) {
 	)
 
 	okBtn := widget.NewButton("OK", func() {
-		// Получаем значения из полей.
 		ip := strings.TrimSpace(ipEntry.Text)
 		pass := strings.TrimSpace(passEntry.Text)
 		sshPort := strings.TrimSpace(sshPortEntry.Text)
@@ -320,8 +589,6 @@ func showServerSetupDialog(a fyne.App) {
 			return
 		}
 
-		// Формируем аргументы для запуска внешнего скрипта.
-		// Локальная папка передаётся как "profiles", куда скрипт сохранит config.json
 		args := []string{
 			"-ip", ip,
 			"-p", pass,
@@ -332,7 +599,6 @@ func showServerSetupDialog(a fyne.App) {
 			"-f", fileName,
 		}
 
-		// Создаем окно для отображения хода выполнения.
 		progressWin := a.NewWindow("Server Setup Progress")
 		progressText := widget.NewMultiLineEntry()
 		progressText.Wrapping = fyne.TextWrapWord
@@ -341,7 +607,6 @@ func showServerSetupDialog(a fyne.App) {
 		progressWin.Resize(fyne.NewSize(500, 400))
 		progressWin.Show()
 
-		// Запускаем внешний исполняемый файл server_setup (scripts/script).
 		cmd := exec.Command("scripts/script", args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
@@ -361,7 +626,6 @@ func showServerSetupDialog(a fyne.App) {
 			return
 		}
 
-		// Чтение stdout (построчно)
 		go func() {
 			reader := bufio.NewReader(stdoutPipe)
 			for {
@@ -375,7 +639,6 @@ func showServerSetupDialog(a fyne.App) {
 			}
 		}()
 
-		// Чтение stderr (построчно)
 		go func() {
 			reader := bufio.NewReader(stderrPipe)
 			for {
@@ -389,7 +652,6 @@ func showServerSetupDialog(a fyne.App) {
 			}
 		}()
 
-		// Ожидание завершения процесса в отдельной горутине.
 		go func() {
 			err := cmd.Wait()
 			if err != nil {
@@ -400,7 +662,6 @@ func showServerSetupDialog(a fyne.App) {
 		}()
 
 		win.Close()
-		// Обновляем список профилей.
 		mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
 		mainContent.Refresh()
 	})
@@ -411,20 +672,150 @@ func showServerSetupDialog(a fyne.App) {
 
 	buttons := container.NewHBox(layout.NewSpacer(), okBtn, cancelBtn)
 	dialogContent := container.NewBorder(nil, buttons, nil, nil, form)
+
 	win.SetContent(dialogContent)
 	win.Resize(fyne.NewSize(500, 400))
 	win.Show()
 }
 
+// ensureConfigMode проверяет и корректирует конфигурацию в файле path в зависимости от режима.
+func ensureConfigMode(path, mode string) {
+	var cfg settings.Config
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Println("Error reading config:", err)
+		return
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		fmt.Println("Error parsing config:", err)
+		return
+	}
+
+	if mode == "vpn" {
+		// Если inbound не в VPN-режиме, обновляем его.
+		if len(cfg.Inbounds) == 0 || cfg.Inbounds[0].Type != "tun" {
+			if len(cfg.Inbounds) > 0 {
+				cfg.Inbounds[0].Type = "tun"
+				cfg.Inbounds[0].Tag = "tun-in"
+				cfg.Inbounds[0].Listen = ""
+				cfg.Inbounds[0].Listen_port = 0
+				cfg.Inbounds[0].Interface_name = "proxycoretun"
+				cfg.Inbounds[0].Address = []string{"10.10.0.1/30"}
+				cfg.Inbounds[0].Mtu = 1500
+				cfg.Inbounds[0].Auto_route = true
+				cfg.Inbounds[0].Strict_route = true
+				cfg.Inbounds[0].Stack = "system"
+			} else {
+				cfg.Inbounds = []settings.Inbounds{{
+					Type:                       "tun",
+					Tag:                        "tun-in",
+					Sniff:                      true,
+					Sniff_override_destination: false,
+					Interface_name:             "proxycoretun",
+					Address:                    []string{"10.10.0.1/30"},
+					Mtu:                        1500,
+					Auto_route:                 true,
+					Strict_route:               true,
+					Stack:                      "system",
+				}}
+			}
+			// Добавляем секции DNS и Route для VPN.
+			cfg.DNS = &settings.DNS{
+				Servers: []settings.DNSServer{
+					{Tag: "proxy_dns", Address: "https://1.1.1.1/dns-query", Strategy: "ipv4_only", Detour: "vless-out"},
+					{Tag: "fallback_dns", Address: "8.8.8.8", Strategy: "ipv4_only", Detour: "direct-out"},
+				},
+				Final: "proxy_dns",
+			}
+			cfg.Route = &settings.Route{
+				Auto_detect_interface: true,
+				Rules: []settings.RouteRule{
+					{Protocol: "udp", Outbound: "direct-out"},
+					{Protocol: "dns", Outbound: "dns-out"},
+					{Ip_is_private: true, Outbound: "direct-out"},
+				},
+			}
+			// Добавляем Outbounds типа "dns" и "block", если их нет.
+			hasDNS, hasBlock := false, false
+			for _, o := range cfg.Outbounds {
+				if o.Type == "dns" {
+					hasDNS = true
+				}
+				if o.Type == "block" {
+					hasBlock = true
+				}
+			}
+			if !hasDNS {
+				cfg.Outbounds = append(cfg.Outbounds, settings.Outbound{Type: "dns", Tag: "dns-out"})
+			}
+			if !hasBlock {
+				cfg.Outbounds = append(cfg.Outbounds, settings.Outbound{Type: "block", Tag: "block"})
+			}
+		}
+	} else { // режим proxy
+		// Если inbound не соответствует системному профилю.
+		if len(cfg.Inbounds) == 0 || cfg.Inbounds[0].Type != "mixed" {
+			if len(cfg.Inbounds) > 0 {
+				cfg.Inbounds[0].Type = "mixed"
+				cfg.Inbounds[0].Tag = "mixed-in"
+				cfg.Inbounds[0].Listen = "127.0.0.1"
+				cfg.Inbounds[0].Listen_port = 2080
+				// Убираем VPN-поля.
+				cfg.Inbounds[0].Interface_name = ""
+				cfg.Inbounds[0].Address = nil
+				cfg.Inbounds[0].Mtu = 0
+				cfg.Inbounds[0].Auto_route = false
+				cfg.Inbounds[0].Strict_route = false
+				cfg.Inbounds[0].Stack = ""
+			} else {
+				cfg.Inbounds = []settings.Inbounds{{
+					Type:                       "mixed",
+					Tag:                        "mixed-in",
+					Listen:                     "127.0.0.1",
+					Listen_port:                2080,
+					Sniff:                      true,
+					Sniff_override_destination: true,
+				}}
+			}
+			// Удаляем VPN-специфичные секции.
+			cfg.DNS = nil
+			cfg.Route = nil
+			// Фильтруем Outbounds: оставляем только те, что не относятся к "dns" и "block".
+			var newOutbounds []settings.Outbound
+			for _, o := range cfg.Outbounds {
+				if o.Type != "dns" && o.Type != "block" {
+					newOutbounds = append(newOutbounds, o)
+				}
+			}
+			cfg.Outbounds = newOutbounds
+		}
+	}
+
+	newData, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		fmt.Println("Error marshaling updated config:", err)
+		return
+	}
+	if err := os.WriteFile(path, newData, 0644); err != nil {
+		fmt.Println("Error writing updated config:", err)
+		return
+	}
+	fmt.Println("Configuration at", path, "updated to mode:", mode)
+}
+
 // runConfig запускает proxy-core с указанным конфигом.
-// Если уже запущен процесс, он будет остановлен перед запуском нового.
 func runConfig(configPath string) {
-	// Завершаем любой ранее запущенный процесс.
+
+	ensureConfigMode(configPath, currentMode)
+
 	stopConfig()
 
-	if err := settings.EnableSystemProxy(); err != nil {
-		fmt.Println("Error enabling system proxy:", err)
-		return
+	// В режиме proxy включаем системный прокси, в режиме vpn - нет.
+	if currentMode != "vpn" {
+		if err := settings.EnableSystemProxy(); err != nil {
+			fmt.Println("Error enabling system proxy:", err)
+			return
+		}
 	}
 
 	cmdMutex.Lock()
@@ -460,7 +851,7 @@ func runConfig(configPath string) {
 	fmt.Println("Started proxy-core with config:", configPath)
 }
 
-// stopConfig останавливает процесс proxy-core и отключает системный прокси.
+// stopConfig останавливает процесс proxy-core и отключает системный прокси, если режим proxy.
 func stopConfig() {
 	cmdMutex.Lock()
 	cmd := currentCmd
@@ -476,7 +867,6 @@ func stopConfig() {
 	} else {
 		fmt.Println("Process kill signal sent.")
 	}
-	// Дожидаемся завершения процесса.
 	if err := cmd.Wait(); err != nil {
 		fmt.Println("Error waiting for process exit:", err)
 	} else {
@@ -488,8 +878,11 @@ func stopConfig() {
 	currentConfig = ""
 	cmdMutex.Unlock()
 
-	if err := settings.DisableSystemProxy(); err != nil {
-		fmt.Println("Error disabling system proxy:", err)
+	// Отключаем системный прокси, только если режим proxy.
+	if currentMode != "vpn" {
+		if err := settings.DisableSystemProxy(); err != nil {
+			fmt.Println("Error disabling system proxy:", err)
+		}
 	}
 	fmt.Println("Stopped proxy-core")
 }
@@ -753,8 +1146,12 @@ func showUpdateConfigDialog(fileName string) {
 
 		if len(cfg.Inbounds) == 0 {
 			cfg.Inbounds = []settings.Inbounds{{
-				Type: "mixed", Tag: "mixed-in", Listen: "127.0.0.1", Listen_port: 2080,
-				Sniff: true, Sniff_override_destination: true,
+				Type:                       "mixed",
+				Tag:                        "mixed-in",
+				Listen:                     "127.0.0.1",
+				Listen_port:                2080,
+				Sniff:                      true,
+				Sniff_override_destination: true,
 			}}
 		} else {
 			cfg.Inbounds[0].Type = "mixed"
