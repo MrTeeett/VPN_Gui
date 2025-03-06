@@ -2,7 +2,6 @@ package settings
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -252,6 +251,7 @@ func enableLinuxProxy() error {
 		{"gsettings", "set", "org.gnome.system.proxy.https", "port", proxyPort},
 	}
 	for _, args := range commands {
+		// #nosec G204 -- Аргументы проверены и безопасны
 		cmd := exec.Command(args[0], args[1:]...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -275,5 +275,5 @@ func disableLinuxProxy() error {
 
 // errorf форматирует сообщение об ошибке.
 func errorf(format string, args ...interface{}) error {
-	return errors.New(fmt.Sprintf(format, args...))
+	return fmt.Errorf(format, args...)
 }

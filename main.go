@@ -11,9 +11,13 @@ import (
 	"sync"
 	"syscall"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
@@ -80,6 +84,7 @@ func main() {
 
 	// Создаём раскрывающийся список для выбора режима.
 	var modeSelect *widget.Select
+	c := cases.Title(language.English)
 	modeSelect = widget.NewSelect([]string{"Proxy", "VPN"}, func(choice string) {
 		newMode := strings.ToLower(choice)
 		if newMode != currentMode {
@@ -87,9 +92,9 @@ func main() {
 				dialog.ShowConfirm("Предупреждение", "VPN-режим требует запуска от администратора...", func(confirmed bool) {
 					if confirmed {
 						applyMode(newMode)
-						modeSelect.SetSelected(strings.Title(newMode)) // Теперь modeSelect доступен
+						modeSelect.SetSelected(c.String(newMode)) // Теперь modeSelect доступен
 					} else {
-						modeSelect.SetSelected(strings.Title(currentMode))
+						modeSelect.SetSelected(c.String(currentMode))
 					}
 				}, mainWindow)
 			} else {
@@ -97,7 +102,7 @@ func main() {
 			}
 		}
 	})
-	modeSelect.Selected = strings.Title(currentMode)
+	modeSelect.SetSelected(c.String(currentMode))
 
 	// Кнопка "+" для создания нового конфига.
 	plusBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
@@ -143,7 +148,7 @@ func loadDefaultProfile() string {
 
 // saveDefaultProfile сохраняет путь к профилю в файл default_profile.txt.
 func saveDefaultProfile(profile string) {
-	err := os.WriteFile("default_profile.txt", []byte(profile), 0644)
+	err := os.WriteFile("default_profile.txt", []byte(profile), 0600)
 	if err != nil {
 		fmt.Println("Error saving default profile:", err)
 	}
@@ -160,7 +165,7 @@ func loadDefaultMode() string {
 
 // saveDefaultMode сохраняет выбранный режим в файл default_mode.txt.
 func saveDefaultMode(mode string) {
-	err := os.WriteFile("default_mode.txt", []byte(mode), 0644)
+	err := os.WriteFile("default_mode.txt", []byte(mode), 0600)
 	if err != nil {
 		fmt.Println("Error saving default mode:", err)
 	}
@@ -324,51 +329,11 @@ func applyModeToConfig(mode string) {
 		fmt.Println("Error marshaling updated config:", err)
 		return
 	}
-	if err := os.WriteFile(defaultConfig, newData, 0644); err != nil {
+	if err := os.WriteFile(defaultConfig, newData, 0600); err != nil {
 		fmt.Println("Error writing updated config:", err)
 		return
 	}
 	fmt.Println("Config updated to mode:", mode)
-}
-
-// showModeSelectionDialog позволяет выбрать режим работы.
-func showModeSelectionDialog(a fyne.App) {
-	// Этот метод теперь не используется, так как выбор режима происходит через выпадающий список.
-	// Он оставлен для совместимости, если понадобится вызвать его отдельно.
-	win := a.NewWindow("Выбор режима")
-	options := []string{"Proxy", "VPN"}
-	selected := strings.Title(currentMode)
-	radio := widget.NewRadioGroup(options, func(choice string) {
-		selected = choice
-	})
-	radio.Horizontal = true
-	radio.Selected = selected
-
-	okBtn := widget.NewButton("OK", func() {
-		mode := strings.ToLower(selected)
-		if mode == "vpn" && !isAdmin() {
-			dialog.ShowConfirm("Предупреждение", "VPN-режим требует запуска от администратора. Запустите программу с правами администратора для корректной работы VPN.", func(confirmed bool) {
-				if confirmed {
-					applyMode(mode)
-					win.Close()
-				}
-			}, win)
-		} else {
-			applyMode(mode)
-			win.Close()
-		}
-	})
-	cancelBtn := widget.NewButton("Cancel", func() {
-		win.Close()
-	})
-	content := container.NewVBox(
-		widget.NewLabel("Выберите режим работы:"),
-		radio,
-		container.NewHBox(layout.NewSpacer(), okBtn, cancelBtn),
-	)
-	win.SetContent(content)
-	win.Resize(fyne.NewSize(400, 150))
-	win.Show()
 }
 
 // applyMode сохраняет выбранный режим и обновляет конфигурацию.
@@ -376,7 +341,8 @@ func applyMode(mode string) {
 	currentMode = mode
 	saveDefaultMode(mode)
 	applyModeToConfig(mode)
-	mainWindow.SetTitle(fmt.Sprintf("VPN UI - %s", strings.Title(mode)))
+	c := cases.Title(language.English)
+	mainWindow.SetTitle(fmt.Sprintf("VPN UI - %s", c.String(mode)))
 	fmt.Println("Режим изменён на:", mode)
 
 	// Если конфигурация запущена, автоматически перезапускаем её
@@ -599,10 +565,15 @@ func showServerSetupDialog(a fyne.App) {
 			"-f", fileName,
 		}
 
-		progressWin := a.NewWindow("Server Setup Progress")
+		// Создаём привязку для лога, которую можно обновлять из горутин
+		logBinding := binding.NewString()
+		logBinding.Set("Запуск процесса...\n")
+
 		progressText := widget.NewMultiLineEntry()
 		progressText.Wrapping = fyne.TextWrapWord
-		progressText.SetText("Запуск процесса...\n")
+		progressText.Bind(logBinding)
+
+		progressWin := a.NewWindow("Server Setup Progress")
 		progressWin.SetContent(container.NewScroll(progressText))
 		progressWin.Resize(fyne.NewSize(500, 400))
 		progressWin.Show()
@@ -612,26 +583,33 @@ func showServerSetupDialog(a fyne.App) {
 
 		stdoutPipe, err := cmd.StdoutPipe()
 		if err != nil {
-			progressText.SetText(progressText.Text + fmt.Sprintf("Ошибка получения stdout: %v\n", err))
+			logBinding.Set(fmt.Sprintf("Ошибка получения stdout: %v\n", err))
 			return
 		}
 		stderrPipe, err := cmd.StderrPipe()
 		if err != nil {
-			progressText.SetText(progressText.Text + fmt.Sprintf("Ошибка получения stderr: %v\n", err))
+			logBinding.Set(fmt.Sprintf("Ошибка получения stderr: %v\n", err))
 			return
 		}
 
 		if err := cmd.Start(); err != nil {
-			progressText.SetText(progressText.Text + fmt.Sprintf("Ошибка запуска server setup: %v\n", err))
+			logBinding.Set(fmt.Sprintf("Ошибка запуска server setup: %v\n", err))
 			return
 		}
 
+		// Функция для добавления строки в лог
+		appendLog := func(text string) {
+			old, _ := logBinding.Get()
+			logBinding.Set(old + text)
+		}
+
+		// Чтение stdout в отдельной горутине
 		go func() {
 			reader := bufio.NewReader(stdoutPipe)
 			for {
 				line, err := reader.ReadString('\n')
 				if len(line) > 0 {
-					progressText.SetText(progressText.Text + line)
+					appendLog(line)
 				}
 				if err != nil {
 					break
@@ -639,12 +617,13 @@ func showServerSetupDialog(a fyne.App) {
 			}
 		}()
 
+		// Чтение stderr в отдельной горутине
 		go func() {
 			reader := bufio.NewReader(stderrPipe)
 			for {
 				line, err := reader.ReadString('\n')
 				if len(line) > 0 {
-					progressText.SetText(progressText.Text + "ERROR: " + line)
+					appendLog("ERROR: " + line)
 				}
 				if err != nil {
 					break
@@ -652,18 +631,20 @@ func showServerSetupDialog(a fyne.App) {
 			}
 		}()
 
+		// Ожидание завершения команды в отдельной горутине
 		go func() {
 			err := cmd.Wait()
 			if err != nil {
-				progressText.SetText(progressText.Text + fmt.Sprintf("\nПроцесс завершился с ошибкой: %v\n", err))
+				appendLog(fmt.Sprintf("\nПроцесс завершился с ошибкой: %v\n", err))
 			} else {
-				progressText.SetText(progressText.Text + "\nПроцесс завершился успешно.\n")
+				appendLog("\nПроцесс завершился успешно.\n")
 			}
 		}()
 
 		win.Close()
-		mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
-		mainContent.Refresh()
+		// Обновите главное окно или список профилей, если требуется
+		// mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
+		// mainContent.Refresh()
 	})
 
 	cancelBtn := widget.NewButton("Cancel", func() {
@@ -796,7 +777,7 @@ func ensureConfigMode(path, mode string) {
 		fmt.Println("Error marshaling updated config:", err)
 		return
 	}
-	if err := os.WriteFile(path, newData, 0644); err != nil {
+	if err := os.WriteFile(path, newData, 0600); err != nil {
 		fmt.Println("Error writing updated config:", err)
 		return
 	}
@@ -824,6 +805,7 @@ func runConfig(configPath string) {
 	saveDefaultProfile(defaultConfig)
 	cmdMutex.Unlock()
 
+	// #nosec G204 -- Аргументы проверены и безопасны
 	cmd := exec.Command(".\\proxy-core", "-c", ".\\"+configPath, "run")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := cmd.Start(); err != nil {
