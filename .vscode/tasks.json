@@ -31,7 +31,7 @@
         {
             "label": "Setup Virtual Environment",
             "type": "shell",
-            "command": "python -m venv .venv && .venv/Scripts/activate && pip install -r scripts/requirements.txt",
+            "command": "python -m venv .venv; .venv/Scripts/activate; pip install -r scripts/requirements.txt",
             "problemMatcher": [],
             "group": {
                 "kind": "build",
