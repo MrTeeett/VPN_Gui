@@ -12,6 +12,21 @@
 		"env": {},
 		"showLog": true,
 		"dlvFlags": ["--check-go-version=false"]
-	  }
+	  },
+      {
+        "name": "Debug script",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/scripts/client_script.py",
+        "cwd": "${workspaceFolder}",
+        "args": [
+            "-ip", "",
+            "-p", "",
+            "-uport", "443",
+            "-s", "www.nvidia.com",
+            "-l", "profiles",
+            "-f", "test"
+        ]
+        }
 	]
 }

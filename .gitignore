@@ -4,3 +4,6 @@ builds
 profiles
 go.sum
 go.mod
+.golangci.yml
+proxy-core.*
+scripts.*
