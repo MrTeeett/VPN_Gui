@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -109,8 +111,11 @@ func main() {
 		showCreateConfigDialog(a)
 	})
 
-	// Нижняя панель: располагаем dropdown выбора режима слева от кнопки "+".
-	bottomBar := container.NewBorder(nil, nil, nil, container.NewHBox(layout.NewSpacer(), modeSelect, plusBtn), nil)
+	linkImportBtn := widget.NewButtonWithIcon("Import by Link", theme.ContentPasteIcon(), func() {
+		showImportProfileDialog(a)
+	})
+
+	bottomBar := container.NewBorder(nil, nil, nil, container.NewHBox(layout.NewSpacer(), modeSelect, plusBtn, linkImportBtn), nil)
 
 	// Итоговый контейнер.
 	content := container.NewBorder(topBar, bottomBar, sidePanel, nil, mainContent)
@@ -169,6 +174,158 @@ func saveDefaultMode(mode string) {
 	if err != nil {
 		fmt.Println("Error saving default mode:", err)
 	}
+}
+
+// generateVlessLink читает конфиг из path и формирует VLESS-ссылку с использованием baseName как имени профиля.
+func generateVlessLink(path, baseName string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Println("Error reading config for link generation:", err)
+		return ""
+	}
+	var cfg settings.Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		fmt.Println("Error unmarshaling config:", err)
+		return ""
+	}
+	var vless settings.Outbound
+	for _, o := range cfg.Outbounds {
+		if o.Tag == "vless-out" {
+			vless = o
+			break
+		}
+	}
+	if vless.Server == "" || vless.Uuid == "" {
+		fmt.Println("Недостаточно данных для генерации ссылки")
+		return ""
+	}
+	security := "none"
+	if vless.Tls != nil && vless.Tls.Enabled {
+		if vless.Tls.Reality != nil && vless.Tls.Reality.Enabled {
+			security = "reality"
+		} else {
+			security = "tls"
+		}
+	}
+	q := url.Values{}
+	q.Set("security", security)
+	if vless.Tls != nil {
+		if vless.Tls.Server_name != "" {
+			q.Set("sni", vless.Tls.Server_name)
+		}
+		if len(vless.Tls.Alpn) > 0 {
+			q.Set("alpn", vless.Tls.Alpn[0])
+		}
+		if vless.Tls.Utils != nil && vless.Tls.Utils.Enabled && vless.Tls.Utils.Fingerprint != "" {
+			q.Set("fp", vless.Tls.Utils.Fingerprint)
+		}
+		if vless.Tls.Reality != nil && vless.Tls.Reality.Enabled {
+			q.Set("pbk", vless.Tls.Reality.Public_key)
+			q.Set("sid", vless.Tls.Reality.Short_id)
+		}
+	}
+	q.Set("type", vless.Network)
+	q.Set("flow", vless.Flow)
+	q.Set("encryption", "none")
+	uri := fmt.Sprintf("vless://%s@%s:%d?%s#%s", vless.Uuid, vless.Server, vless.Server_port, q.Encode(), baseName)
+	return uri
+}
+
+// parseVlessURI разбирает VLESS-ссылку и возвращает сформированный Config и имя профиля (из фрагмента).
+func parseVlessURI(link string) (settings.Config, string, error) {
+	u, err := url.Parse(link)
+	if err != nil {
+		return settings.Config{}, "", err
+	}
+	if u.Scheme != "vless" {
+		return settings.Config{}, "", fmt.Errorf("Неверная схема: %s", u.Scheme)
+	}
+	uuid := u.User.Username()
+	host := u.Host
+	var server string
+	var port uint
+	if strings.Contains(host, ":") {
+		parts := strings.Split(host, ":")
+		server = parts[0]
+		p, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return settings.Config{}, "", err
+		}
+		port = uint(p)
+	} else {
+		server = host
+		port = 443
+	}
+	q := u.Query()
+	security := q.Get("security")
+	sni := q.Get("sni")
+	alpn := q.Get("alpn")
+	fp := q.Get("fp")
+	pbk := q.Get("pbk")
+	sid := q.Get("sid")
+	netType := q.Get("type")
+	flow := q.Get("flow")
+	tlsEnabled := false
+	realityEnabled := false
+	if security != "" && security != "none" {
+		tlsEnabled = true
+		if security == "reality" {
+			realityEnabled = true
+		}
+	}
+
+	// Формируем Config, аналогично функции buildConfigFromForm.
+	cfg := settings.Config{}
+	cfg.Log.Level = "info"
+	inbound := settings.Inbounds{
+		Type:                       "mixed",
+		Tag:                        "mixed-in",
+		Listen:                     "127.0.0.1",
+		Listen_port:                2080,
+		Sniff:                      true,
+		Sniff_override_destination: true,
+	}
+	cfg.Inbounds = []settings.Inbounds{inbound}
+	vlessOutbound := settings.Outbound{
+		Type:        "vless",
+		Tag:         "vless-out",
+		Server:      server,
+		Server_port: port,
+		Uuid:        uuid,
+		Flow:        flow,
+		Network:     netType,
+	}
+	if tlsEnabled {
+		vlessOutbound.Tls = &settings.TLS{
+			Enabled:     true,
+			Server_name: sni,
+			Alpn:        []string{alpn},
+		}
+		if fp != "" {
+			vlessOutbound.Tls.Utils = &settings.Utils{
+				Enabled:     true,
+				Fingerprint: fp,
+			}
+		}
+		if realityEnabled {
+			vlessOutbound.Tls.Reality = &settings.Reality{
+				Enabled:    true,
+				Public_key: pbk,
+				Short_id:   sid,
+			}
+		}
+	}
+	directOutbound := settings.Outbound{
+		Type: "direct",
+		Tag:  "direct-out",
+	}
+	cfg.Outbounds = []settings.Outbound{vlessOutbound, directOutbound}
+
+	profileName := u.Fragment
+	if profileName == "" {
+		profileName = "profile"
+	}
+	return cfg, profileName, nil
 }
 
 // applyModeToConfig обновляет конфигурацию в файле defaultConfig в зависимости от режима.
@@ -484,12 +641,27 @@ func createProfilesList() fyne.CanvasObject {
 			}
 		}(fullPath))
 
+		// Кнопка для копирования VLESS-ссылки.
+		copyBtn := widget.NewButton("Copy", func(path, baseName string) func() {
+			return func() {
+				link := generateVlessLink(path, baseName)
+				if link == "" {
+					dialog.ShowInformation("Ошибка", "Не удалось сгенерировать ссылку", mainWindow)
+					return
+				}
+				clip := fyne.CurrentApp().Driver().AllWindows()[0].Clipboard()
+				clip.SetContent(link)
+				dialog.ShowInformation("Успех", "Ссылка скопирована в буфер обмена", mainWindow)
+			}
+		}(fullPath, baseName))
+
 		row := container.NewHBox(
 			widget.NewLabel(baseName),
 			layout.NewSpacer(),
 			runStopBtn,
 			updateBtn,
 			deleteBtn,
+			copyBtn, // добавляем кнопку копирования ссылки
 		)
 		list.Add(row)
 	}
@@ -867,6 +1039,47 @@ func stopConfig() {
 		}
 	}
 	fmt.Println("Stopped proxy-core")
+}
+
+// showImportProfileDialog открывает диалог для импорта профиля по VLESS-ссылке.
+func showImportProfileDialog(a fyne.App) {
+	win := a.NewWindow("Import Profile from Link")
+
+	linkEntry := widget.NewEntry()
+	linkEntry.SetPlaceHolder("vless://...")
+
+	form := widget.NewForm(widget.NewFormItem("VLESS-ссылка", linkEntry))
+
+	okBtn := widget.NewButton("OK", func() {
+		link := strings.TrimSpace(linkEntry.Text)
+		if link == "" {
+			dialog.ShowInformation("Ошибка", "Ссылка не может быть пустой", win)
+			return
+		}
+		cfg, profileName, err := parseVlessURI(link)
+		if err != nil {
+			dialog.ShowInformation("Ошибка", fmt.Sprintf("Неверный формат ссылки: %v", err), win)
+			return
+		}
+		// Сохраняем конфиг в папку profiles с именем profileName.json.
+		err = saveConfig(profileName, cfg)
+		if err != nil {
+			dialog.ShowInformation("Ошибка", fmt.Sprintf("Не удалось сохранить конфиг: %v", err), win)
+			return
+		}
+		dialog.ShowInformation("Успех", "Профиль успешно импортирован", mainWindow)
+		win.Close()
+		mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
+		mainContent.Refresh()
+	})
+	cancelBtn := widget.NewButton("Cancel", func() {
+		win.Close()
+	})
+	buttons := container.NewHBox(layout.NewSpacer(), okBtn, cancelBtn)
+	content := container.NewBorder(nil, buttons, nil, nil, form)
+	win.SetContent(content)
+	win.Resize(fyne.NewSize(500, 150))
+	win.Show()
 }
 
 // showCreateConfigDialog открывает окно для создания нового конфига.
