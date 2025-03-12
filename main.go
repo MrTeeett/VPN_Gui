@@ -7,12 +7,15 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 
@@ -30,6 +33,18 @@ import (
 	"main/settings"
 )
 
+func cleanup() {
+	fmt.Println("Выполняется очистка: останавливаем proxy-core и отключаем системный прокси (если используется)")
+	stopConfig()
+	if currentMode != "vpn" {
+		if err := settings.DisableSystemProxy(); err != nil {
+			fmt.Println("Ошибка при отключении системного прокси:", err)
+		} else {
+			fmt.Println("Системный прокси успешно отключён")
+		}
+	}
+}
+
 func init() {
 	if err := os.MkdirAll("profiles", 0755); err != nil {
 		fmt.Println("Error creating profiles folder:", err)
@@ -38,37 +53,48 @@ func init() {
 
 var (
 	mainContent   *fyne.Container
-	currentCmd    *exec.Cmd   // текущий запущенный процесс proxy-core
-	currentConfig string      // путь к запущенному конфигу
-	defaultConfig string      // последний запущенный файл для запуска по умолчанию
-	cmdMutex      sync.Mutex  // защита currentCmd/currentConfig
-	mainWindow    fyne.Window // главное окно для доступа из трей-меню
-	currentMode   string      // "vpn" или "proxy"
+	currentCmd    *exec.Cmd
+	currentConfig string
+	defaultConfig string
+	cmdMutex      sync.Mutex
+	mainWindow    fyne.Window
+	currentMode   string // "vpn" или "proxy"
 )
 
 func main() {
-	// Запускаем системный трей в отдельной горутине.
+	// Обработка сигналов для корректного завершения
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		s := <-sigChan
+		fmt.Println("Получен сигнал завершения:", s)
+		cleanup()
+		os.Exit(1)
+	}()
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("Паника:", r)
+			cleanup()
+			os.Exit(1)
+		}
+	}()
+
 	go systray.Run(onReady, onExit)
 
 	a := app.New()
 	mainWindow = a.NewWindow("VPN UI")
 
-	// Читаем сохранённый профиль и режим по умолчанию.
 	defaultConfig = loadDefaultProfile()
-	currentMode = loadDefaultMode() // ("vpn" или "proxy")
-
-	// Применяем выбранный режим к текущему конфигу.
+	currentMode = loadDefaultMode()
 	applyModeToConfig(currentMode)
 
-	// Боковая панель – кнопки для Profiles, Settings, Скриптов.
 	sidePanel := container.NewVBox(
 		widget.NewButtonWithIcon("Profiles", theme.DocumentCreateIcon(), func() {
 			mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
 			mainContent.Refresh()
 		}),
-		widget.NewButtonWithIcon("Settings", theme.SettingsIcon(), func() {
-			// Обработка настроек
-		}),
+		widget.NewButtonWithIcon("Settings", theme.SettingsIcon(), func() {}),
 		widget.NewButtonWithIcon("Scripts", theme.MediaPlayIcon(), func() {
 			mainContent.Objects = []fyne.CanvasObject{createScriptsTab(a)}
 			mainContent.Refresh()
@@ -77,14 +103,10 @@ func main() {
 		widget.NewLabel("Current Version: alpha 1"),
 	)
 
-	// Главный контейнер – изначально отображаем список профилей.
 	mainContent = container.NewVBox(createProfilesList())
-
-	// Верхняя панель.
 	hamburger := widget.NewButtonWithIcon("", theme.MenuIcon(), nil)
 	topBar := container.NewBorder(nil, nil, hamburger, nil, widget.NewLabel("Profiles"))
 
-	// Создаём раскрывающийся список для выбора режима.
 	var modeSelect *widget.Select
 	c := cases.Title(language.English)
 	modeSelect = widget.NewSelect([]string{"Proxy", "VPN"}, func(choice string) {
@@ -106,34 +128,27 @@ func main() {
 	})
 	modeSelect.SetSelected(c.String(currentMode))
 
-	// Кнопка "+" для создания нового конфига.
 	plusBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
 		showCreateConfigDialog(a)
 	})
-
 	linkImportBtn := widget.NewButtonWithIcon("Import by Link", theme.ContentPasteIcon(), func() {
 		showImportProfileDialog(a)
 	})
+	bottomBar := container.NewBorder(nil, nil, nil,
+		container.NewHBox(layout.NewSpacer(), modeSelect, plusBtn, linkImportBtn), nil)
 
-	bottomBar := container.NewBorder(nil, nil, nil, container.NewHBox(layout.NewSpacer(), modeSelect, plusBtn, linkImportBtn), nil)
-
-	// Итоговый контейнер.
 	content := container.NewBorder(topBar, bottomBar, sidePanel, nil, mainContent)
 	mainWindow.SetContent(content)
 
-	// Логика скрытия боковой панели.
-	var panelOpen = true
 	hamburger.OnTapped = func() {
-		panelOpen = !panelOpen
-		if panelOpen {
-			content = container.NewBorder(topBar, bottomBar, sidePanel, nil, mainContent)
-		} else {
+		if content.Objects[0] == sidePanel {
 			content = container.NewBorder(topBar, bottomBar, nil, nil, mainContent)
+		} else {
+			content = container.NewBorder(topBar, bottomBar, sidePanel, nil, mainContent)
 		}
 		mainWindow.SetContent(content)
 	}
 
-	// При закрытии окна оно скрывается в трей.
 	mainWindow.SetCloseIntercept(func() {
 		mainWindow.Hide()
 	})
@@ -142,7 +157,6 @@ func main() {
 	mainWindow.ShowAndRun()
 }
 
-// loadDefaultProfile читает путь к профилю из файла default_profile.txt.
 func loadDefaultProfile() string {
 	data, err := os.ReadFile("default_profile.txt")
 	if err != nil {
@@ -151,32 +165,26 @@ func loadDefaultProfile() string {
 	return strings.TrimSpace(string(data))
 }
 
-// saveDefaultProfile сохраняет путь к профилю в файл default_profile.txt.
 func saveDefaultProfile(profile string) {
-	err := os.WriteFile("default_profile.txt", []byte(profile), 0600)
-	if err != nil {
+	if err := os.WriteFile("default_profile.txt", []byte(profile), 0600); err != nil {
 		fmt.Println("Error saving default profile:", err)
 	}
 }
 
-// loadDefaultMode читает режим ("vpn" или "proxy") из файла default_mode.txt.
 func loadDefaultMode() string {
 	data, err := os.ReadFile("default_mode.txt")
 	if err != nil {
-		return "proxy" // режим по умолчанию – proxy
+		return "proxy"
 	}
 	return strings.TrimSpace(string(data))
 }
 
-// saveDefaultMode сохраняет выбранный режим в файл default_mode.txt.
 func saveDefaultMode(mode string) {
-	err := os.WriteFile("default_mode.txt", []byte(mode), 0600)
-	if err != nil {
+	if err := os.WriteFile("default_mode.txt", []byte(mode), 0600); err != nil {
 		fmt.Println("Error saving default mode:", err)
 	}
 }
 
-// generateVlessLink читает конфиг из path и формирует VLESS-ссылку с использованием baseName как имени профиля.
 func generateVlessLink(path, baseName string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -227,18 +235,16 @@ func generateVlessLink(path, baseName string) string {
 	q.Set("type", vless.Network)
 	q.Set("flow", vless.Flow)
 	q.Set("encryption", "none")
-	uri := fmt.Sprintf("vless://%s@%s:%d?%s#%s", vless.Uuid, vless.Server, vless.Server_port, q.Encode(), baseName)
-	return uri
+	return fmt.Sprintf("vless://%s@%s:%d?%s#%s", vless.Uuid, vless.Server, vless.Server_port, q.Encode(), baseName)
 }
 
-// parseVlessURI разбирает VLESS-ссылку и возвращает сформированный Config и имя профиля (из фрагмента).
 func parseVlessURI(link string) (settings.Config, string, error) {
 	u, err := url.Parse(link)
 	if err != nil {
 		return settings.Config{}, "", err
 	}
 	if u.Scheme != "vless" {
-		return settings.Config{}, "", fmt.Errorf("Неверная схема: %s", u.Scheme)
+		return settings.Config{}, "", fmt.Errorf("неверная схема: %s", u.Scheme)
 	}
 	uuid := u.User.Username()
 	host := u.Host
@@ -265,16 +271,9 @@ func parseVlessURI(link string) (settings.Config, string, error) {
 	sid := q.Get("sid")
 	netType := q.Get("type")
 	flow := q.Get("flow")
-	tlsEnabled := false
-	realityEnabled := false
-	if security != "" && security != "none" {
-		tlsEnabled = true
-		if security == "reality" {
-			realityEnabled = true
-		}
-	}
+	tlsEnabled := security != "" && security != "none"
+	realityEnabled := security == "reality"
 
-	// Формируем Config, аналогично функции buildConfigFromForm.
 	cfg := settings.Config{}
 	cfg.Log.Level = "info"
 	inbound := settings.Inbounds{
@@ -320,7 +319,6 @@ func parseVlessURI(link string) (settings.Config, string, error) {
 		Tag:  "direct-out",
 	}
 	cfg.Outbounds = []settings.Outbound{vlessOutbound, directOutbound}
-
 	profileName := u.Fragment
 	if profileName == "" {
 		profileName = "profile"
@@ -328,13 +326,10 @@ func parseVlessURI(link string) (settings.Config, string, error) {
 	return cfg, profileName, nil
 }
 
-// applyModeToConfig обновляет конфигурацию в файле defaultConfig в зависимости от режима.
 func applyModeToConfig(mode string) {
-	// Загружаем существующий конфиг (если он есть).
 	var cfg settings.Config
 	data, err := os.ReadFile(defaultConfig)
 	if err != nil {
-		// Если файла нет, создаём базовую конфигурацию.
 		cfg = settings.Config{
 			Log: settings.Log{Level: "info"},
 			Inbounds: []settings.Inbounds{{
@@ -380,15 +375,11 @@ func applyModeToConfig(mode string) {
 	}
 
 	if mode == "vpn" {
-		// Переключаем inbound в режим VPN: тип "tun" с VPN‑параметрами.
 		if len(cfg.Inbounds) > 0 {
 			cfg.Inbounds[0].Type = "tun"
 			cfg.Inbounds[0].Tag = "tun-in"
-			// Удаляем поля Listen и Listen_port для VPN‑режима.
 			cfg.Inbounds[0].Listen = ""
 			cfg.Inbounds[0].Listen_port = 0
-
-			// Устанавливаем дополнительные VPN‑параметры:
 			cfg.Inbounds[0].Interface_name = "proxycoretun"
 			cfg.Inbounds[0].Address = []string{"10.10.0.1/30"}
 			cfg.Inbounds[0].Mtu = 1500
@@ -409,7 +400,6 @@ func applyModeToConfig(mode string) {
 				Stack:                      "system",
 			}}
 		}
-		// Добавляем секцию DNS для VPN‑режима.
 		cfg.DNS = &settings.DNS{
 			Servers: []settings.DNSServer{
 				{Tag: "proxy_dns", Address: "https://1.1.1.1/dns-query", Strategy: "ipv4_only", Detour: "vless-out"},
@@ -417,7 +407,6 @@ func applyModeToConfig(mode string) {
 			},
 			Final: "proxy_dns",
 		}
-		// Добавляем секцию Route для VPN‑режима.
 		cfg.Route = &settings.Route{
 			Auto_detect_interface: true,
 			Rules: []settings.RouteRule{
@@ -426,7 +415,6 @@ func applyModeToConfig(mode string) {
 				{Ip_is_private: true, Outbound: "direct-out"},
 			},
 		}
-		// Добавляем Outbounds типа "dns" и "block", если их нет.
 		hasDNS, hasBlock := false, false
 		for _, o := range cfg.Outbounds {
 			if o.Type == "dns" {
@@ -442,15 +430,12 @@ func applyModeToConfig(mode string) {
 		if !hasBlock {
 			cfg.Outbounds = append(cfg.Outbounds, settings.Outbound{Type: "block", Tag: "block"})
 		}
-	} else { // режим "proxy"
+	} else {
 		if len(cfg.Inbounds) > 0 {
 			cfg.Inbounds[0].Type = "mixed"
 			cfg.Inbounds[0].Tag = "mixed-in"
-			// В режиме Proxy используем системный inbound с Listen и Listen_port.
 			cfg.Inbounds[0].Listen = "127.0.0.1"
 			cfg.Inbounds[0].Listen_port = 2080
-
-			// Очищаем VPN‑поля:
 			cfg.Inbounds[0].Interface_name = ""
 			cfg.Inbounds[0].Address = nil
 			cfg.Inbounds[0].Mtu = 0
@@ -467,10 +452,8 @@ func applyModeToConfig(mode string) {
 				Sniff_override_destination: true,
 			}}
 		}
-		// Удаляем VPN‑специфичные секции.
 		cfg.DNS = nil
 		cfg.Route = nil
-		// Фильтруем Outbounds: оставляем только те, что не относятся к "dns" и "block".
 		var newOutbounds []settings.Outbound
 		for _, o := range cfg.Outbounds {
 			if o.Type != "dns" && o.Type != "block" {
@@ -480,7 +463,6 @@ func applyModeToConfig(mode string) {
 		cfg.Outbounds = newOutbounds
 	}
 
-	// Сохраняем обновлённый конфиг.
 	newData, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		fmt.Println("Error marshaling updated config:", err)
@@ -493,34 +475,24 @@ func applyModeToConfig(mode string) {
 	fmt.Println("Config updated to mode:", mode)
 }
 
-// applyMode сохраняет выбранный режим и обновляет конфигурацию.
 func applyMode(mode string) {
 	currentMode = mode
 	saveDefaultMode(mode)
 	applyModeToConfig(mode)
-	c := cases.Title(language.English)
-	mainWindow.SetTitle(fmt.Sprintf("VPN UI - %s", c.String(mode)))
+	caser := cases.Title(language.English)
+	mainWindow.SetTitle(fmt.Sprintf("VPN UI - %s", caser.String(mode)))
 	fmt.Println("Режим изменён на:", mode)
-
-	// Если конфигурация запущена, автоматически перезапускаем её
 	if currentCmd != nil && defaultConfig != "" {
 		stopConfig()
 		runConfig(defaultConfig)
 	}
 }
 
-// isAdmin проверяет, запущена ли программа от администратора (только для Windows).
 func isAdmin() bool {
 	cmd := exec.Command("net", "session")
-	err := cmd.Run()
-	return err == nil
+	return cmd.Run() == nil
 }
 
-//
-// Остальные функции остаются без изменений
-//
-
-// onReady вызывается при инициализации трей-иконки.
 func onReady() {
 	systray.SetIcon(iconData())
 	systray.SetTitle("VPN UI")
@@ -557,12 +529,8 @@ func onReady() {
 	}()
 }
 
-// onExit вызывается при выходе из трей.
-func onExit() {
-	// Очистка при необходимости.
-}
+func onExit() {}
 
-// iconData возвращает байты иконки (1x1 прозрачный PNG).
 func iconData() []byte {
 	return []byte{
 		137, 80, 78, 71, 13, 10, 26, 10,
@@ -577,7 +545,6 @@ func iconData() []byte {
 	}
 }
 
-// createProfilesList читает файлы из папки "profiles" и отображает их списком.
 func createProfilesList() fyne.CanvasObject {
 	files, err := os.ReadDir("profiles")
 	if err != nil {
@@ -589,14 +556,12 @@ func createProfilesList() fyne.CanvasObject {
 		if f.IsDir() {
 			continue
 		}
-
 		fileName := f.Name()
 		ext := filepath.Ext(fileName)
 		baseName := strings.TrimSuffix(fileName, ext)
 		fullPath := filepath.Join("profiles", fileName)
 
-		runStopBtn := widget.NewButton("Run", nil)
-		runStopBtn.OnTapped = func(path string) func() {
+		runStopBtn := widget.NewButton("Run", func(path string) func() {
 			return func() {
 				cmdMutex.Lock()
 				processRunning := currentCmd != nil
@@ -614,7 +579,7 @@ func createProfilesList() fyne.CanvasObject {
 				mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
 				mainContent.Refresh()
 			}
-		}(fullPath)
+		}(fullPath))
 
 		cmdMutex.Lock()
 		if currentCmd != nil && currentConfig == fullPath {
@@ -641,7 +606,6 @@ func createProfilesList() fyne.CanvasObject {
 			}
 		}(fullPath))
 
-		// Кнопка для копирования VLESS-ссылки.
 		copyBtn := widget.NewButton("Copy", func(path, baseName string) func() {
 			return func() {
 				link := generateVlessLink(path, baseName)
@@ -661,44 +625,33 @@ func createProfilesList() fyne.CanvasObject {
 			runStopBtn,
 			updateBtn,
 			deleteBtn,
-			copyBtn, // добавляем кнопку копирования ссылки
+			copyBtn,
 		)
 		list.Add(row)
 	}
 	return list
 }
 
-// createScriptsTab создаёт содержимое вкладки "Скрипты" с кнопкой Server Setup.
 func createScriptsTab(a fyne.App) fyne.CanvasObject {
 	btn := widget.NewButton("Server Setup", func() {
 		showServerSetupDialog(a)
 	})
-	return container.NewVBox(
-		widget.NewLabel("Скрипты"),
-		btn,
-	)
+	return container.NewVBox(widget.NewLabel("Скрипты"), btn)
 }
 
-// showServerSetupDialog открывает окно для ввода данных, запускает внешний скрипт,
-// отображает ход выполнения и сохраняет получившийся конфиг.
 func showServerSetupDialog(a fyne.App) {
 	win := a.NewWindow("Server Setup")
 
 	fileNameEntry := widget.NewEntry()
 	fileNameEntry.SetPlaceHolder("Name")
-
 	ipEntry := widget.NewEntry()
 	ipEntry.SetPlaceHolder("IP-address")
-
 	passEntry := widget.NewPasswordEntry()
 	passEntry.SetPlaceHolder("password")
-
 	sshPortEntry := widget.NewEntry()
 	sshPortEntry.SetText("22")
-
 	userPortEntry := widget.NewEntry()
 	userPortEntry.SetPlaceHolder("Configuration port on server (preferably 443)")
-
 	serverNamesEntry := widget.NewEntry()
 	serverNamesEntry.SetPlaceHolder("disguised site (www.nvidia.com)")
 
@@ -720,10 +673,7 @@ func showServerSetupDialog(a fyne.App) {
 		fileName := strings.TrimSpace(fileNameEntry.Text)
 
 		if ip == "" || pass == "" || userPort == "" || serverNames == "" || fileName == "" {
-			win.SetContent(container.NewVBox(
-				form,
-				widget.NewLabel("Пожалуйста, заполните все обязательные поля."),
-			))
+			win.SetContent(container.NewVBox(form, widget.NewLabel("Пожалуйста, заполните все обязательные поля.")))
 			return
 		}
 
@@ -737,14 +687,11 @@ func showServerSetupDialog(a fyne.App) {
 			"-f", fileName,
 		}
 
-		// Создаём привязку для лога, которую можно обновлять из горутин
 		logBinding := binding.NewString()
 		logBinding.Set("Запуск процесса...\n")
-
 		progressText := widget.NewMultiLineEntry()
 		progressText.Wrapping = fyne.TextWrapWord
 		progressText.Bind(logBinding)
-
 		progressWin := a.NewWindow("Server Setup Progress")
 		progressWin.SetContent(container.NewScroll(progressText))
 		progressWin.Resize(fyne.NewSize(500, 400))
@@ -769,13 +716,11 @@ func showServerSetupDialog(a fyne.App) {
 			return
 		}
 
-		// Функция для добавления строки в лог
 		appendLog := func(text string) {
 			old, _ := logBinding.Get()
 			logBinding.Set(old + text)
 		}
 
-		// Чтение stdout в отдельной горутине
 		go func() {
 			reader := bufio.NewReader(stdoutPipe)
 			for {
@@ -789,7 +734,6 @@ func showServerSetupDialog(a fyne.App) {
 			}
 		}()
 
-		// Чтение stderr в отдельной горутине
 		go func() {
 			reader := bufio.NewReader(stderrPipe)
 			for {
@@ -803,7 +747,6 @@ func showServerSetupDialog(a fyne.App) {
 			}
 		}()
 
-		// Ожидание завершения команды в отдельной горутине
 		go func() {
 			err := cmd.Wait()
 			if err != nil {
@@ -814,9 +757,6 @@ func showServerSetupDialog(a fyne.App) {
 		}()
 
 		win.Close()
-		// Обновите главное окно или список профилей, если требуется
-		// mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
-		// mainContent.Refresh()
 	})
 
 	cancelBtn := widget.NewButton("Cancel", func() {
@@ -825,13 +765,11 @@ func showServerSetupDialog(a fyne.App) {
 
 	buttons := container.NewHBox(layout.NewSpacer(), okBtn, cancelBtn)
 	dialogContent := container.NewBorder(nil, buttons, nil, nil, form)
-
 	win.SetContent(dialogContent)
 	win.Resize(fyne.NewSize(500, 400))
 	win.Show()
 }
 
-// ensureConfigMode проверяет и корректирует конфигурацию в файле path в зависимости от режима.
 func ensureConfigMode(path, mode string) {
 	var cfg settings.Config
 	data, err := os.ReadFile(path)
@@ -845,7 +783,6 @@ func ensureConfigMode(path, mode string) {
 	}
 
 	if mode == "vpn" {
-		// Если inbound не в VPN-режиме, обновляем его.
 		if len(cfg.Inbounds) == 0 || cfg.Inbounds[0].Type != "tun" {
 			if len(cfg.Inbounds) > 0 {
 				cfg.Inbounds[0].Type = "tun"
@@ -872,7 +809,6 @@ func ensureConfigMode(path, mode string) {
 					Stack:                      "system",
 				}}
 			}
-			// Добавляем секции DNS и Route для VPN.
 			cfg.DNS = &settings.DNS{
 				Servers: []settings.DNSServer{
 					{Tag: "proxy_dns", Address: "https://1.1.1.1/dns-query", Strategy: "ipv4_only", Detour: "vless-out"},
@@ -888,7 +824,6 @@ func ensureConfigMode(path, mode string) {
 					{Ip_is_private: true, Outbound: "direct-out"},
 				},
 			}
-			// Добавляем Outbounds типа "dns" и "block", если их нет.
 			hasDNS, hasBlock := false, false
 			for _, o := range cfg.Outbounds {
 				if o.Type == "dns" {
@@ -905,15 +840,13 @@ func ensureConfigMode(path, mode string) {
 				cfg.Outbounds = append(cfg.Outbounds, settings.Outbound{Type: "block", Tag: "block"})
 			}
 		}
-	} else { // режим proxy
-		// Если inbound не соответствует системному профилю.
+	} else {
 		if len(cfg.Inbounds) == 0 || cfg.Inbounds[0].Type != "mixed" {
 			if len(cfg.Inbounds) > 0 {
 				cfg.Inbounds[0].Type = "mixed"
 				cfg.Inbounds[0].Tag = "mixed-in"
 				cfg.Inbounds[0].Listen = "127.0.0.1"
 				cfg.Inbounds[0].Listen_port = 2080
-				// Убираем VPN-поля.
 				cfg.Inbounds[0].Interface_name = ""
 				cfg.Inbounds[0].Address = nil
 				cfg.Inbounds[0].Mtu = 0
@@ -930,10 +863,8 @@ func ensureConfigMode(path, mode string) {
 					Sniff_override_destination: true,
 				}}
 			}
-			// Удаляем VPN-специфичные секции.
 			cfg.DNS = nil
 			cfg.Route = nil
-			// Фильтруем Outbounds: оставляем только те, что не относятся к "dns" и "block".
 			var newOutbounds []settings.Outbound
 			for _, o := range cfg.Outbounds {
 				if o.Type != "dns" && o.Type != "block" {
@@ -949,21 +880,17 @@ func ensureConfigMode(path, mode string) {
 		fmt.Println("Error marshaling updated config:", err)
 		return
 	}
-	if err := os.WriteFile(path, newData, 0600); err != nil {
+	if err := os.WriteFile(defaultConfig, newData, 0600); err != nil {
 		fmt.Println("Error writing updated config:", err)
 		return
 	}
-	fmt.Println("Configuration at", path, "updated to mode:", mode)
+	fmt.Println("Configuration at", defaultConfig, "updated to mode:", mode)
 }
 
-// runConfig запускает proxy-core с указанным конфигом.
 func runConfig(configPath string) {
-
 	ensureConfigMode(configPath, currentMode)
-
 	stopConfig()
 
-	// В режиме proxy включаем системный прокси, в режиме vpn - нет.
 	if currentMode != "vpn" {
 		if err := settings.EnableSystemProxy(); err != nil {
 			fmt.Println("Error enabling system proxy:", err)
@@ -977,12 +904,15 @@ func runConfig(configPath string) {
 	saveDefaultProfile(defaultConfig)
 	cmdMutex.Unlock()
 
-	// #nosec G204 -- Аргументы проверены и безопасны
 	cmd := exec.Command(".\\proxy-core", "-c", ".\\"+configPath, "run")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := cmd.Start(); err != nil {
 		fmt.Println("Error starting proxy-core:", err)
 		return
+	}
+
+	if err := assignToJobObject(cmd.Process); err != nil {
+		fmt.Println("Error assigning process to job object:", err)
 	}
 
 	cmdMutex.Lock()
@@ -1005,7 +935,36 @@ func runConfig(configPath string) {
 	fmt.Println("Started proxy-core with config:", configPath)
 }
 
-// stopConfig останавливает процесс proxy-core и отключает системный прокси, если режим proxy.
+var globalJob windows.Handle
+
+func assignToJobObject(proc *os.Process) error {
+	if globalJob == 0 {
+		hJob, err := windows.CreateJobObject(nil, nil)
+		if err != nil {
+			return fmt.Errorf("CreateJobObject failed: %v", err)
+		}
+		var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+		info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+		size := uint32(unsafe.Sizeof(info))
+		_, err = windows.SetInformationJobObject(hJob, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&info)), size)
+		if err != nil {
+			return fmt.Errorf("SetInformationJobObject failed: %v", err)
+		}
+		globalJob = hJob
+	}
+
+	hProc, err := windows.OpenProcess(windows.PROCESS_ALL_ACCESS, false, uint32(proc.Pid))
+	if err != nil {
+		return fmt.Errorf("OpenProcess failed: %v", err)
+	}
+	defer windows.CloseHandle(hProc)
+
+	if err = windows.AssignProcessToJobObject(globalJob, hProc); err != nil {
+		return fmt.Errorf("AssignProcessToJobObject failed: %v", err)
+	}
+	return nil
+}
+
 func stopConfig() {
 	cmdMutex.Lock()
 	cmd := currentCmd
@@ -1032,7 +991,6 @@ func stopConfig() {
 	currentConfig = ""
 	cmdMutex.Unlock()
 
-	// Отключаем системный прокси, только если режим proxy.
 	if currentMode != "vpn" {
 		if err := settings.DisableSystemProxy(); err != nil {
 			fmt.Println("Error disabling system proxy:", err)
@@ -1041,15 +999,11 @@ func stopConfig() {
 	fmt.Println("Stopped proxy-core")
 }
 
-// showImportProfileDialog открывает диалог для импорта профиля по VLESS-ссылке.
 func showImportProfileDialog(a fyne.App) {
 	win := a.NewWindow("Import Profile from Link")
-
 	linkEntry := widget.NewEntry()
 	linkEntry.SetPlaceHolder("vless://...")
-
 	form := widget.NewForm(widget.NewFormItem("VLESS-ссылка", linkEntry))
-
 	okBtn := widget.NewButton("OK", func() {
 		link := strings.TrimSpace(linkEntry.Text)
 		if link == "" {
@@ -1061,9 +1015,7 @@ func showImportProfileDialog(a fyne.App) {
 			dialog.ShowInformation("Ошибка", fmt.Sprintf("Неверный формат ссылки: %v", err), win)
 			return
 		}
-		// Сохраняем конфиг в папку profiles с именем profileName.json.
-		err = saveConfig(profileName, cfg)
-		if err != nil {
+		if err = saveConfig(profileName, cfg); err != nil {
 			dialog.ShowInformation("Ошибка", fmt.Sprintf("Не удалось сохранить конфиг: %v", err), win)
 			return
 		}
@@ -1072,9 +1024,7 @@ func showImportProfileDialog(a fyne.App) {
 		mainContent.Objects = []fyne.CanvasObject{createProfilesList()}
 		mainContent.Refresh()
 	})
-	cancelBtn := widget.NewButton("Cancel", func() {
-		win.Close()
-	})
+	cancelBtn := widget.NewButton("Cancel", func() { win.Close() })
 	buttons := container.NewHBox(layout.NewSpacer(), okBtn, cancelBtn)
 	content := container.NewBorder(nil, buttons, nil, nil, form)
 	win.SetContent(content)
@@ -1082,52 +1032,34 @@ func showImportProfileDialog(a fyne.App) {
 	win.Show()
 }
 
-// showCreateConfigDialog открывает окно для создания нового конфига.
 func showCreateConfigDialog(a fyne.App) {
 	newWin := a.NewWindow("Создать новый конфиг")
-
 	configNameEntry := widget.NewEntry()
 	configNameEntry.SetPlaceHolder("Имя файла (без .json)")
-
 	serverEntry := widget.NewEntry()
 	serverEntry.SetText("193.32.178.80")
-
 	serverPortEntry := widget.NewEntry()
 	serverPortEntry.SetText("443")
-
 	uuidEntry := widget.NewEntry()
 	uuidEntry.SetText("887e27c6-cb6f-4200-95a5-ee1bbf383d0f")
-
-	flowSelect := widget.NewSelect(
-		[]string{"xtls-rprx-vision", "xtls-rprx-splice", "xtls-rprx-origin"},
-		func(string) {},
-	)
+	flowSelect := widget.NewSelect([]string{"xtls-rprx-vision", "xtls-rprx-splice", "xtls-rprx-origin"}, func(string) {})
 	flowSelect.SetSelected("xtls-rprx-vision")
-
 	networkSelect := widget.NewSelect([]string{"tcp", "kcp", "ws"}, func(string) {})
 	networkSelect.SetSelected("tcp")
-
 	tlsEnabledCheck := widget.NewCheck("TLS Enabled", nil)
 	tlsEnabledCheck.SetChecked(true)
-
 	serverNameEntry := widget.NewEntry()
 	serverNameEntry.SetText("www.nvidia.com")
-
 	alpnEntry := widget.NewEntry()
 	alpnEntry.SetText("h2")
-
 	utlsEnabledCheck := widget.NewCheck("uTLS Enabled", nil)
 	utlsEnabledCheck.SetChecked(true)
-
 	fingerprintEntry := widget.NewEntry()
 	fingerprintEntry.SetText("chrome")
-
 	realityEnabledCheck := widget.NewCheck("Reality Enabled", nil)
 	realityEnabledCheck.SetChecked(true)
-
 	publicKeyEntry := widget.NewEntry()
 	publicKeyEntry.SetText("Bvu2NigYahtp1YHyVJvE3yknCqLmNUJi0RAwdQPWKF4")
-
 	shortIDEntry := widget.NewEntry()
 	shortIDEntry.SetText("4054b202f9223bdb")
 
@@ -1154,7 +1086,6 @@ func showCreateConfigDialog(a fyne.App) {
 			fmt.Println("Имя файла не заполнено")
 			return
 		}
-
 		cfg := buildConfigFromForm(
 			serverEntry.Text,
 			serverPortEntry.Text,
@@ -1170,7 +1101,6 @@ func showCreateConfigDialog(a fyne.App) {
 			publicKeyEntry.Text,
 			shortIDEntry.Text,
 		)
-
 		if err := saveConfig(cfgName, cfg); err != nil {
 			fmt.Println("Error saving config:", err)
 			return
@@ -1180,23 +1110,17 @@ func showCreateConfigDialog(a fyne.App) {
 		mainContent.Refresh()
 	})
 
-	cancelBtn := widget.NewButton("Cancel", func() {
-		newWin.Close()
-	})
-
+	cancelBtn := widget.NewButton("Cancel", func() { newWin.Close() })
 	buttons := container.NewHBox(layout.NewSpacer(), okBtn, cancelBtn)
 	dialogContent := container.NewBorder(nil, buttons, nil, nil, form)
-
 	newWin.SetContent(dialogContent)
 	newWin.Resize(fyne.NewSize(500, 550))
 	newWin.Show()
 }
 
-// showUpdateConfigDialog открывает окно для обновления существующего конфига.
 func showUpdateConfigDialog(fileName string) {
 	newWin := fyne.CurrentApp().NewWindow("Update Config: " + fileName)
 	filePath := filepath.Join("profiles", fileName)
-
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		fmt.Println("Error reading file:", err)
@@ -1233,10 +1157,7 @@ func showUpdateConfigDialog(fileName string) {
 	serverPortEntry.SetText(fmt.Sprintf("%d", vlessOut.Server_port))
 	uuidEntry := widget.NewEntry()
 	uuidEntry.SetText(vlessOut.Uuid)
-	flowSelect := widget.NewSelect(
-		[]string{"xtls-rprx-vision", "xtls-rprx-splice", "xtls-rprx-origin"},
-		func(string) {},
-	)
+	flowSelect := widget.NewSelect([]string{"xtls-rprx-vision", "xtls-rprx-splice", "xtls-rprx-origin"}, func(string) {})
 	flowSelect.SetSelected(vlessOut.Flow)
 	networkSelect := widget.NewSelect([]string{"tcp", "kcp", "ws"}, func(string) {})
 	if vlessOut.Network != "" {
@@ -1375,10 +1296,7 @@ func showUpdateConfigDialog(fileName string) {
 		mainContent.Refresh()
 	})
 
-	cancelBtn := widget.NewButton("Cancel", func() {
-		newWin.Close()
-	})
-
+	cancelBtn := widget.NewButton("Cancel", func() { newWin.Close() })
 	buttons := container.NewHBox(layout.NewSpacer(), okBtn, cancelBtn)
 	dialogContent := container.NewBorder(nil, buttons, nil, nil, form)
 	newWin.SetContent(dialogContent)
@@ -1386,7 +1304,6 @@ func showUpdateConfigDialog(fileName string) {
 	newWin.Show()
 }
 
-// buildConfigFromForm создаёт новый Config на основе введённых данных.
 func buildConfigFromForm(
 	server, port, uuid, flow, network string,
 	tlsEnabled bool,
@@ -1449,7 +1366,6 @@ func buildConfigFromForm(
 	return cfg
 }
 
-// saveConfig сохраняет Config под именем cfgName (без .json) в папку profiles.
 func saveConfig(cfgName string, cfg settings.Config) error {
 	if err := os.MkdirAll("profiles", 0755); err != nil {
 		return err
@@ -1463,7 +1379,6 @@ func saveConfig(cfgName string, cfg settings.Config) error {
 	return nil
 }
 
-// parseUint преобразует строку в uint.
 func parseUint(s string) uint {
 	var val uint
 	_, err := fmt.Sscanf(s, "%d", &val)
