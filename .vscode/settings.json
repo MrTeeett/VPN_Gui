@@ -25,21 +25,23 @@
 	"terminal.integrated.fontSize": 14, // Размер шрифта в терминале
 
 	"cSpell.words": [
-		"alpn",
-		"edns",
-		"fyne",
-		"gioui",
-		"gofont",
-		"Hiddify",
-		"miekg",
-		"outbounds",
-		"rprx",
-		"sagernet",
-		"Serv",
-		"utls",
-		"vless",
-		"xtls",
-		"сериализации",
-		"Сериализуем"
-	]
+        "alpn",
+        "edns",
+        "fyne",
+        "getlantern",
+        "gioui",
+        "gofont",
+        "Hiddify",
+        "miekg",
+        "outbounds",
+        "rprx",
+        "sagernet",
+        "Serv",
+        "systray",
+        "utls",
+        "vless",
+        "xtls",
+        "сериализации",
+        "Сериализуем"
+    ]
 }

@@ -7,6 +7,7 @@
 			"command": "make",
 			"args": [
 				"build",
+				"all",
 				"-o",
 				"${workspaceFolder}/bin"
 			],

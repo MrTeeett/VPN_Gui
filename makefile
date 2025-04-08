@@ -10,7 +10,7 @@ SCRIPT_EXE := script.exe
 
 all: build
 
-build: build-main build-proxy-core build-scripts
+build: build-main build-proxy-core
 	@echo "Copy $(PROXY_CORE_NAME) в $(BUILD_DIR)..."
 	copy /Y $(PROXY_CORE_DIR)\$(PROXY_CORE_NAME) $(BUILD_DIR)\$(PROXY_CORE_NAME)
 
@@ -27,11 +27,6 @@ build-proxy-core:
 	) else ( \
 		echo "Ошибка: $(PROXY_CORE_NAME) не найден в $(PROXY_CORE_DIR)" \
 	)
-
-build-scripts:
-	@echo "Compile Python-script in exe..."
-	if not exist $(BUILD_DIR)\scripts mkdir $(BUILD_DIR)\scripts
-	pyinstaller --onefile --name $(SCRIPT_EXE:.exe=) --distpath $(BUILD_DIR)\scripts --workpath build\pyinstaller_temp --specpath build\pyinstaller_temp $(SCRIPT_NAME)
 
 clean:
 	if exist $(BUILD_DIR) rd /S /Q $(BUILD_DIR)
